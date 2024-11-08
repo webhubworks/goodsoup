@@ -11,4 +11,5 @@ vendor/webhubworks/goodsoup/cyclonedx-npm  --spec-version=1.3 --output-format=js
 echo "Done."
 
 # Gathering the data and fill them into a sqlite database
-echo "TODO: Gathering the data and fill them into a sqlite database..."
+echo "Gathering the data and fill them into a sqlite database..."
+php vendor/webhubworks/goodsoup/sbom-to-sqlite.php

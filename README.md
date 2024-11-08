@@ -1,3 +1,6 @@
+# goodsoup
+![goodsoup.jpeg](goodsoup.jpeg)
+
 ## How to create the cyclonedx-npm standalone executable
 1. `git clone https://github.com/CycloneDX/cyclonedx-node-npm.git vendor-tools/cyclonedx-npm`
 2. `cd vendor-tools/cyclonedx-npm`
