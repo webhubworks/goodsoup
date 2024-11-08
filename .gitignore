@@ -1,0 +1,7 @@
+/vendor/
+/.idea
+/.ddev
+.phpunit.result.cache
+/.phpunit.cache/
+build/report.junit.xml
+.DS_Store

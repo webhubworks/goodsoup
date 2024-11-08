@@ -1,0 +1,27 @@
+{
+    "name": "webhubworks/goodsoup",
+    "description": "A package creating sboms for composer and npm packages, storing the outcome into sqlite.",
+    "version": "0.1.0",
+    "autoload": {
+        "psr-4": {
+            "Webhubworks\\Goodsoup\\": "src/"
+        }
+    },
+    "authors": [
+        {
+            "name": "Marven Thieme",
+            "email": "thieme@webhub.de"
+        }
+    ],
+    "require": {
+        "cyclonedx/cyclonedx-php-composer": "^5.2"
+    },
+    "config": {
+        "allow-plugins": {
+            "cyclonedx/cyclonedx-php-composer": true
+        }
+    },
+    "bin": [
+        "bin/goodsoup.sh"
+    ]
+}
