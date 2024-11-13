@@ -1,46 +1,5 @@
 <?php
 
-// Database file path (adjust the path as needed)
-$dbFile = './sboms/sbom-database.sqlite';
-
-// SBOM JSON files (adjust the paths as needed)
-$composerSBOM = './sboms/sbom-composer.json';
-$nodeSBOM = './sboms/sbom-node.json';
-
-// Open or create the SQLite database
-$db = new PDO('sqlite:' . $dbFile);
-
-// Create the items table if it doesn't exist
-/**
- * repository
- * ecosystem (z.B. "composer"/"node")
- * asset (z.B. "library")
- * name
- * version
- * bom_ref
- * description (Wenn node: "Frontend - "+description; Wenn composer: "Backend - "+description)
- * author
- * license
- * manual_end_of_support
- * manual_risk_level
- */
-$db->exec("
-    CREATE TABLE IF NOT EXISTS items (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        repository TEXT NOT NULL,
-        ecosystem TEXT,
-        asset TEXT DEFAULT 'library',
-        name TEXT NOT NULL,
-        version TEXT NOT NULL,
-        bom_ref TEXT,
-        description TEXT,
-        author TEXT,
-        license TEXT,
-        manual_end_of_support TEXT,
-        manual_risk_level TEXT
-    )
-");
-
 // Function to insert package details into the database
 function insertPackage($db, $package, $repositoryName, $ecosystem): void
 {
@@ -64,7 +23,7 @@ function insertPackage($db, $package, $repositoryName, $ecosystem): void
 }
 
 // Function to parse SBOM JSON and insert packages into the database
-function parseAndInsertSBOM($db, $jsonFile, $repositoryName, $ecosystem): void
+function parseAndUpsertSBOM($db, $jsonFile, $repositoryName, $ecosystem): void
 {
     // Read and decode the JSON file
     $jsonContent = file_get_contents($jsonFile);
@@ -99,12 +58,64 @@ function transformLicensesString($packageData): string
     return $licenseString;
 }
 
+function dbSetup(string $appName): PDO
+{
+    // Database file path (adjust the path as needed)
+    $dbFile = './sboms/sbom-'.$appName.'.sqlite';
+
+    // Open or create the SQLite database
+    $db = new PDO('sqlite:' . $dbFile);
+
+    // Create the items table if it doesn't exist
+    /**
+     * repository
+     * ecosystem (z.B. "composer"/"node")
+     * asset (z.B. "library")
+     * name
+     * version
+     * bom_ref
+     * description (Wenn node: "Frontend - "+description; Wenn composer: "Backend - "+description)
+     * author
+     * license
+     * manual_end_of_support
+     * manual_risk_level
+     */
+    $db->exec("
+        CREATE TABLE IF NOT EXISTS items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repository TEXT NOT NULL,
+            ecosystem TEXT,
+            asset TEXT DEFAULT 'library',
+            name TEXT NOT NULL,
+            version TEXT NOT NULL,
+            bom_ref TEXT,
+            description TEXT,
+            author TEXT,
+            license TEXT,
+            manual_end_of_support TEXT,
+            manual_risk_level TEXT
+        )
+    ");
+
+    return $db;
+}
+
 $repositoryName = trim(shell_exec('composer show -s --name-only'));
+$appName = explode('/', $repositoryName)[1];
 
-// Parse Composer SBOM JSON
-parseAndInsertSBOM($db, $composerSBOM, $repositoryName, 'composer');
+$db = dbSetup($appName);
 
-// Parse Node.js SBOM JSON
-parseAndInsertSBOM($db, $nodeSBOM, $repositoryName, 'node');
+parseAndUpsertSBOM(
+    db: $db,
+    jsonFile: './sboms/sbom-composer.json',
+    repositoryName: $repositoryName,
+    ecosystem: 'composer'
+);
+parseAndUpsertSBOM(
+    db: $db,
+    jsonFile: './sboms/sbom-node.json',
+    repositoryName: $repositoryName,
+    ecosystem: 'node'
+);
 
-echo "Data inserted into the database successfully.\n";
+echo "Data upserted into the database successfully.\n";
