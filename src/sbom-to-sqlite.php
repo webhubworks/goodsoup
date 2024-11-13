@@ -1,28 +1,96 @@
 <?php
 
-// Function to insert package details into the database
 function insertPackage($db, $package, $repositoryName, $ecosystem): void
 {
+    $normalColumns = [
+        'repository',
+        'ecosystem',
+        'asset',
+        'name',
+        'version',
+        'bom_ref',
+        'description',
+        'author',
+        'license',
+    ];
+    $manualColumns = ['manual_end_of_support', 'manual_risk_level'];
+    $identifierColumns = ['ecosystem', 'bom_ref'];
 
-    $stmt = $db->prepare("
-        INSERT INTO items (repository, ecosystem, asset, name, version, bom_ref, description, author, license)
-        VALUES (:repository, :ecosystem, :asset, :name, :version, :bom_ref, :description, :author, :license)
-    ");
+    $itemData = [
+        'repository' => $repositoryName,
+        'ecosystem' => $ecosystem,
+        'asset' => $package['type'] ?? '',
+        'name' => $package['name'] ?? '',
+        'version' => $package['version'] ?? '',
+        'bom_ref' => $package['bom-ref'] ?? '',
+        'description' => $package['description'] ?? '',
+        'author' => $package['author'] ?? '',
+        'license' => transformLicensesString($package),
+        'manual_end_of_support' => null,
+        'manual_risk_level' => null,
+    ];
 
-    $stmt->execute([
-        ':repository' => $repositoryName,
-        ':ecosystem' => $ecosystem,
-        ':asset' => $package['type'] ?? '',
-        ':name' => $package['name'] ?? '',
-        ':version' => $package['version'] ?? '',
-        ':bom_ref' => $package['bom-ref'] ?? '',
-        ':description' => $package['description'] ?? '',
-        ':author' => $package['author'] ?? '',
-        ':license' => transformLicensesString($package)
-    ]);
+    /**
+     * Find an existing item based on non-manual columns
+     */
+    $whereClause = implode(' AND ', array_map(fn($col) => "$col = :$col", $identifierColumns));
+    $query = "SELECT * FROM items WHERE $whereClause ORDER BY id DESC LIMIT 1";
+    $stmt = $db->prepare($query);
+
+    foreach ($identifierColumns as $col) {
+        $stmt->bindValue(":$col", $itemData[$col]);
+    }
+
+    $stmt->execute();
+    $existingItem = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    if ($existingItem) {
+        /**
+         * Compare normal columns to see if there's a difference
+         */
+        $hasChanges = false;
+        foreach ($normalColumns as $col) {
+            if ($existingItem[$col] !== $itemData[$col]) {
+                $hasChanges = true;
+                break;
+            }
+        }
+
+        if ($hasChanges) {
+            /**
+             * Prepare data for new row with copied manual values
+             */
+            foreach ($manualColumns as $manualCol) {
+                $itemData[$manualCol] = $existingItem[$manualCol];
+            }
+
+            /**
+             * Insert the new item with updated data
+             */
+            $columns = implode(', ', array_keys($itemData));
+            $placeholders = implode(', ', array_map(fn($col) => ":$col", array_keys($itemData)));
+            $insertQuery = "INSERT INTO items ($columns) VALUES ($placeholders)";
+            $insertStmt = $db->prepare($insertQuery);
+
+            foreach ($itemData as $col => $value) {
+                $insertStmt->bindValue(":$col", $value);
+            }
+            $insertStmt->execute();
+        }
+    } else {
+        // No existing item found; insert the new item as is
+        $columns = implode(', ', array_keys($itemData));
+        $placeholders = implode(', ', array_map(fn($col) => ":$col", array_keys($itemData)));
+        $insertQuery = "INSERT INTO items ($columns) VALUES ($placeholders)";
+        $insertStmt = $db->prepare($insertQuery);
+
+        foreach ($itemData as $col => $value) {
+            $insertStmt->bindValue(":$col", $value);
+        }
+        $insertStmt->execute();
+    }
 }
 
-// Function to parse SBOM JSON and insert packages into the database
 function parseAndUpsertSBOM($db, $jsonFile, $repositoryName, $ecosystem): void
 {
     // Read and decode the JSON file
@@ -35,6 +103,32 @@ function parseAndUpsertSBOM($db, $jsonFile, $repositoryName, $ecosystem): void
             insertPackage($db, $component, $repositoryName, $ecosystem);
         }
     }
+}
+
+function checkForMissingRiskLevels($db): void
+{
+    $query = "
+        SELECT *
+        FROM items AS i1
+        WHERE i1.manual_risk_level IS NULL
+          AND i1.id = (
+              SELECT MAX(i2.id)
+              FROM items AS i2
+              WHERE i2.ecosystem = i1.ecosystem
+                AND i2.bom_ref = i1.bom_ref
+          )
+    ";
+
+    $stmt = $db->prepare($query);
+    $stmt->execute();
+    $itemsWithNullRiskLevel = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+// Step 3: Output a warning for each item
+    foreach ($itemsWithNullRiskLevel as $item) {
+        echo "- Warning: Item with ecosystem '{$item['ecosystem']}' and bom_ref '{$item['bom_ref']}' has a NULL manual_risk_level.\n";
+    }
+
+    echo "Found ".count($itemsWithNullRiskLevel)." items with NULL manual_risk_level.\n";
 }
 
 function transformLicensesString($packageData): string
@@ -117,5 +211,7 @@ parseAndUpsertSBOM(
     repositoryName: $repositoryName,
     ecosystem: 'node'
 );
+
+checkForMissingRiskLevels($db);
 
 echo "Data upserted into the database successfully.\n";
