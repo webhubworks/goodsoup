@@ -1,6 +1,6 @@
 <?php
 
-function insertPackage($db, $package, $repositoryName, $ecosystem): void
+function insertPackage($db, $package, $repositoryName, $ecosystem, $isDev): void
 {
     $normalColumns = [
         'repository',
@@ -9,6 +9,7 @@ function insertPackage($db, $package, $repositoryName, $ecosystem): void
         'name',
         'version',
         'bom_ref',
+        'is_dev',
         'description',
         'author',
         'license',
@@ -23,6 +24,7 @@ function insertPackage($db, $package, $repositoryName, $ecosystem): void
         'name' => $package['name'] ?? '',
         'version' => $package['version'] ?? '',
         'bom_ref' => $package['bom-ref'] ?? '',
+        'is_dev' => $isDev ?? 0,
         'description' => $package['description'] ?? '',
         'author' => $package['author'] ?? '',
         'license' => transformLicensesString($package),
@@ -91,7 +93,7 @@ function insertPackage($db, $package, $repositoryName, $ecosystem): void
     }
 }
 
-function parseAndUpsertSBOM($db, $jsonFile, $repositoryName, $ecosystem): void
+function parseAndUpsertSBOM($db, $jsonFile, $repositoryName, $ecosystem, $dependencyNames, $devDependencyNames): void
 {
     // Read and decode the JSON file
     $jsonContent = file_get_contents($jsonFile);
@@ -100,7 +102,14 @@ function parseAndUpsertSBOM($db, $jsonFile, $repositoryName, $ecosystem): void
     // Check if components exist in the data
     if (isset($data['components']) && is_array($data['components'])) {
         foreach ($data['components'] as $component) {
-            insertPackage($db, $component, $repositoryName, $ecosystem);
+            $combinedName = isset($component['group']) ? $component['group'].'/'.$component['name'] : $component['name'];
+
+            if(in_array($combinedName, array_merge($dependencyNames, $devDependencyNames))) {
+
+                $isDev = in_array($combinedName, $devDependencyNames);
+
+                insertPackage($db, $component, $repositoryName, $ecosystem, $isDev);
+            }
         }
     }
 }
@@ -183,6 +192,7 @@ function dbSetup(string $appName): PDO
             name TEXT NOT NULL,
             version TEXT NOT NULL,
             bom_ref TEXT,
+            is_dev BOOLEAN DEFAULT 0,
             description TEXT,
             author TEXT,
             license TEXT,
@@ -194,8 +204,22 @@ function dbSetup(string $appName): PDO
     return $db;
 }
 
+function getDependencies($filePath, $key) {
+    if (!file_exists($filePath)) {
+        return [];
+    }
+
+    $data = json_decode(file_get_contents($filePath), true);
+    return isset($data[$key]) ? array_keys($data[$key]) : [];
+}
+
 $repositoryName = trim(shell_exec('composer show -s --name-only'));
 $appName = explode('/', $repositoryName)[1];
+
+$directComposerDependencies = getDependencies('composer.json', 'require');
+$directComposerDevDependencies = getDependencies('composer.json', 'require-dev');
+$directNodeDependencies = getDependencies('package.json', 'dependencies');
+$directNodeDevDependencies = getDependencies('package.json', 'devDependencies');
 
 $db = dbSetup($appName);
 
@@ -203,13 +227,17 @@ parseAndUpsertSBOM(
     db: $db,
     jsonFile: './sboms/sbom-composer.json',
     repositoryName: $repositoryName,
-    ecosystem: 'composer'
+    ecosystem: 'composer',
+    dependencyNames: $directComposerDependencies,
+    devDependencyNames: $directComposerDevDependencies,
 );
 parseAndUpsertSBOM(
     db: $db,
     jsonFile: './sboms/sbom-node.json',
     repositoryName: $repositoryName,
-    ecosystem: 'node'
+    ecosystem: 'node',
+    dependencyNames: $directNodeDependencies,
+    devDependencyNames: $directNodeDevDependencies,
 );
 
 checkForMissingRiskLevels($db);
