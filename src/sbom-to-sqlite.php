@@ -52,7 +52,8 @@ function insertPackage($db, $package, $repositoryName, $ecosystem, $isDev): void
          */
         $hasChanges = false;
         foreach ($normalColumns as $col) {
-            if ($existingItem[$col] !== $itemData[$col]) {
+            // We cannot use !== here as we sometime compare different types
+            if ($existingItem[$col] != $itemData[$col]) {
                 $hasChanges = true;
                 break;
             }
@@ -134,10 +135,10 @@ function checkForMissingRiskLevels($db): void
 
 // Step 3: Output a warning for each item
     foreach ($itemsWithNullRiskLevel as $item) {
-        echo "- Warning: Item with ecosystem '{$item['ecosystem']}' and bom_ref '{$item['bom_ref']}' has a NULL manual_risk_level.\n";
+        echo "- Warning: Item with ecosystem '{$item['ecosystem']}' and bom_ref '{$item['bom_ref']}' has no manual_risk_level.\n";
     }
 
-    echo "Found ".count($itemsWithNullRiskLevel)." items with NULL manual_risk_level.\n";
+    echo "Found ".count($itemsWithNullRiskLevel)." items with no manual_risk_level.\n";
 }
 
 function transformLicensesString($packageData): string
