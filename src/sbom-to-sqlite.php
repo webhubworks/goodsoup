@@ -1,6 +1,6 @@
 <?php
 
-function insertPackage($db, $package, $repositoryName, $ecosystem, $isDev): void
+function insertPackage($db, $package, $repositoryName, $ecosystem, $isDev, $latestVersion, $isAbandoned): void
 {
     $normalColumns = [
         'repository',
@@ -8,8 +8,10 @@ function insertPackage($db, $package, $repositoryName, $ecosystem, $isDev): void
         'asset',
         'name',
         'version',
+        'latest_version',
         'bom_ref',
         'is_dev',
+        'is_abandoned',
         'description',
         'author',
         'license',
@@ -23,8 +25,10 @@ function insertPackage($db, $package, $repositoryName, $ecosystem, $isDev): void
         'asset' => $package['type'] ?? '',
         'name' => $package['name'] ?? '',
         'version' => $package['version'] ?? '',
+        'latest_version' => $latestVersion ?? '',
         'bom_ref' => $package['bom-ref'] ?? '',
-        'is_dev' => $isDev ?? 0,
+        'is_dev' => (int) $isDev ?? 0,
+        'is_abandoned' => (int) $isAbandoned ?? 0,
         'description' => $package['description'] ?? '',
         'author' => $package['author'] ?? '',
         'license' => transformLicensesString($package),
@@ -52,8 +56,7 @@ function insertPackage($db, $package, $repositoryName, $ecosystem, $isDev): void
          */
         $hasChanges = false;
         foreach ($normalColumns as $col) {
-            // We cannot use !== here as we sometime compare different types
-            if ($existingItem[$col] != $itemData[$col]) {
+            if ($existingItem[$col] !== $itemData[$col]) {
                 $hasChanges = true;
                 break;
             }
@@ -94,7 +97,7 @@ function insertPackage($db, $package, $repositoryName, $ecosystem, $isDev): void
     }
 }
 
-function parseAndUpsertSBOM($db, $jsonFile, $repositoryName, $ecosystem, $dependencyNames, $devDependencyNames): void
+function parseAndUpsertSBOM($db, $jsonFile, $repositoryName, $ecosystem, $dependencyNames, $devDependencyNames, $outdatedDependencies): void
 {
     // Read and decode the JSON file
     $jsonContent = file_get_contents($jsonFile);
@@ -108,8 +111,19 @@ function parseAndUpsertSBOM($db, $jsonFile, $repositoryName, $ecosystem, $depend
             if(in_array($combinedName, array_merge($dependencyNames, $devDependencyNames))) {
 
                 $isDev = in_array($combinedName, $devDependencyNames);
+                $outdatedDependency = array_filter($outdatedDependencies, function ($dependency) use ($combinedName) {
+                    return $dependency['name'] === $combinedName;
+                });
+                $outdatedDependency = reset($outdatedDependency);
+                if(isset($outdatedDependency) && is_array($outdatedDependency)) {
+                    $isAbandoned = (bool)$outdatedDependency['abandoned'] ?? false;
+                    $latestVersion = $outdatedDependency['latest'] ?? $component['version'];
+                } else {
+                    $isAbandoned = false;
+                    $latestVersion = $component['version'];
+                }
 
-                insertPackage($db, $component, $repositoryName, $ecosystem, $isDev);
+                insertPackage($db, $component, $repositoryName, $ecosystem, $isDev, $latestVersion, $isAbandoned);
             }
         }
     }
@@ -170,20 +184,6 @@ function dbSetup(string $appName): PDO
     // Open or create the SQLite database
     $db = new PDO('sqlite:' . $dbFile);
 
-    // Create the items table if it doesn't exist
-    /**
-     * repository
-     * ecosystem (z.B. "composer"/"node")
-     * asset (z.B. "library")
-     * name
-     * version
-     * bom_ref
-     * description (Wenn node: "Frontend - "+description; Wenn composer: "Backend - "+description)
-     * author
-     * license
-     * manual_end_of_support
-     * manual_risk_level
-     */
     $db->exec("
         CREATE TABLE IF NOT EXISTS items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -192,8 +192,10 @@ function dbSetup(string $appName): PDO
             asset TEXT DEFAULT 'library',
             name TEXT NOT NULL,
             version TEXT NOT NULL,
+            latest_version TEXT NOT NULL,
             bom_ref TEXT,
             is_dev BOOLEAN DEFAULT 0,
+            is_abandoned BOOLEAN DEFAULT 0,
             description TEXT,
             author TEXT,
             license TEXT,
@@ -219,6 +221,8 @@ $appName = explode('/', $repositoryName)[1];
 
 $directComposerDependencies = getDependencies('composer.json', 'require');
 $directComposerDevDependencies = getDependencies('composer.json', 'require-dev');
+$outdatedComposerDependencies = shell_exec('composer outdated --format=json');
+$outdatedComposerDependencies = json_decode($outdatedComposerDependencies, true);
 $directNodeDependencies = getDependencies('package.json', 'dependencies');
 $directNodeDevDependencies = getDependencies('package.json', 'devDependencies');
 
@@ -231,6 +235,7 @@ parseAndUpsertSBOM(
     ecosystem: 'composer',
     dependencyNames: $directComposerDependencies,
     devDependencyNames: $directComposerDevDependencies,
+    outdatedDependencies: $outdatedComposerDependencies['installed'] ?? [],
 );
 parseAndUpsertSBOM(
     db: $db,
@@ -239,6 +244,7 @@ parseAndUpsertSBOM(
     ecosystem: 'node',
     dependencyNames: $directNodeDependencies,
     devDependencyNames: $directNodeDevDependencies,
+    outdatedDependencies: [],
 );
 
 checkForMissingRiskLevels($db);
