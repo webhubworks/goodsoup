@@ -9,6 +9,7 @@ function insertPackage($db, $package, $repositoryName, $ecosystem, $isDev, $late
         'name',
         'version',
         'latest_version',
+        'is_newer_version_available',
         'bom_ref',
         'is_dev',
         'is_abandoned',
@@ -26,6 +27,7 @@ function insertPackage($db, $package, $repositoryName, $ecosystem, $isDev, $late
         'name' => $package['name'] ?? '',
         'version' => $package['version'] ?? '',
         'latest_version' => $latestVersion ?? '',
+        'is_newer_version_available' => (int) version_compare($package['version'], $latestVersion, '<'),
         'bom_ref' => $package['bom-ref'] ?? '',
         'is_dev' => (int) $isDev ?? 0,
         'is_abandoned' => (int) $isAbandoned ?? 0,
@@ -193,6 +195,7 @@ function dbSetup(string $appName): PDO
             name TEXT NOT NULL,
             version TEXT NOT NULL,
             latest_version TEXT NOT NULL,
+            is_newer_version_available BOOLEAN DEFAULT 0,
             bom_ref TEXT,
             is_dev BOOLEAN DEFAULT 0,
             is_abandoned BOOLEAN DEFAULT 0,
@@ -225,6 +228,17 @@ $outdatedComposerDependencies = shell_exec('composer outdated --format=json');
 $outdatedComposerDependencies = json_decode($outdatedComposerDependencies, true);
 $directNodeDependencies = getDependencies('package.json', 'dependencies');
 $directNodeDevDependencies = getDependencies('package.json', 'devDependencies');
+$outdatedNodeDependencies = shell_exec('npm outdated --json');
+$outdatedNodeDependencies = json_decode($outdatedNodeDependencies, true);
+// Map associative array to simple array with 'name', 'version', 'latest', 'abandoned' keys
+$outdatedNodeDependencies = array_map(function ($key, $dependency) {
+    return [
+        'name' => $key,
+        'version' => $dependency['current'],
+        'latest' => $dependency['latest'],
+        'abandoned' => $dependency['wanted'] === 'abandoned',
+    ];
+}, array_keys($outdatedNodeDependencies), $outdatedNodeDependencies);
 
 $db = dbSetup($appName);
 
@@ -244,7 +258,7 @@ parseAndUpsertSBOM(
     ecosystem: 'node',
     dependencyNames: $directNodeDependencies,
     devDependencyNames: $directNodeDevDependencies,
-    outdatedDependencies: [],
+    outdatedDependencies: $outdatedNodeDependencies,
 );
 
 checkForMissingRiskLevels($db);
