@@ -102,19 +102,12 @@ function upsertVulnerabilitiesPerItem(Item $item, ?array $vulnerabilities = null
         return;
     }
 
-    foreach($vulnerabilities as $vulnerability){
-        $item->vulnerabilities()->create([
-            'ecosystem' => $item->ecosystem,
-            'package_name' => $item->name,
-            'title' => $vulnerability['title'],
-            'url' => $vulnerability['link'],
-            'severity' => $vulnerability['severity'],
-            'affected_versions' => $vulnerability['affectedVersions'],
-            'cve' => $vulnerability['cve'] ?? null,
-            'cwe' => $vulnerability['cwe'] ?? null,
-            'advisory_id' => $vulnerability['id'] ?? null,
-            'reported_at' => $vulnerability['reportedAt'] ?? null,
-        ]);
+    if($item->ecosystem === 'composer'){
+        foreach($vulnerabilities as $vulnerability){
+            createVulnerability($item, $vulnerability);
+        }
+    } else {
+        createVulnerability($item, $vulnerabilities);
     }
 
     $item->refresh();
@@ -125,6 +118,10 @@ function upsertVulnerabilitiesPerItem(Item $item, ?array $vulnerabilities = null
     $isLatestVersionAffected = false;
 
     foreach ($affectedVersions as $range) {
+        if(! version_compare( $range, '0.0.1', '>=')){
+            continue;
+        }
+
         if (Semver::satisfies($item->latest_version, $range)) {
             $isLatestVersionAffected = true;
             break;
@@ -137,7 +134,47 @@ function upsertVulnerabilitiesPerItem(Item $item, ?array $vulnerabilities = null
      * - Latest reported vulnerability is less than 30 days old
      */
     $item->update([
-        'is_actively_maintained' => !$isLatestVersionAffected || Carbon::parse($latestReportedVulnerability->reported_at)->diffInDays() < 30,
+        'is_actively_maintained' => !$isLatestVersionAffected || ($latestReportedVulnerability->reported_at && Carbon::parse($latestReportedVulnerability->reported_at)->diffInDays() < 30),
+    ]);
+}
+
+function createVulnerability(Item $item, array $vulnerability): void
+{
+    $title = match($item->ecosystem){
+        'composer' => $vulnerability['title'] ?? '???',
+        'node' => $vulnerability['name'] ?? '???',
+        default => '???'
+    };
+
+    $url = match($item->ecosystem){
+        'composer' => $vulnerability['link'] ?? '',
+        'node' => $vulnerability['via'][0]['url'] ?? '',
+        default => ''
+    };
+
+    $affectedVersions = match($item->ecosystem){
+        'composer' => $vulnerability['affectedVersions'] ?? '',
+        'node' => $vulnerability['range'] ?? '',
+        default => ''
+    };
+
+    $advisoryId = match($item->ecosystem){
+        'composer' => $vulnerability['id'] ?? null,
+        'node' => $vulnerability['via'][0]['source'] ?? null,
+        default => null
+    };
+
+    $item->vulnerabilities()->create([
+        'ecosystem' => $item->ecosystem,
+        'package_name' => $item->name,
+        'title' => $title,
+        'url' => $url,
+        'severity' => $vulnerability['severity'] ?? 'unknown',
+        'affected_versions' => $affectedVersions,
+        'cve' => $vulnerability['cve'] ?? null,
+        'cwe' => isset($vulnerability['via'][0]['cwe']) ? implode(', ', $vulnerability['via'][0]['cwe']) : null,
+        'advisory_id' => $advisoryId,
+        'reported_at' => $vulnerability['reportedAt'] ?? null,
     ]);
 }
 
@@ -342,6 +379,9 @@ $outdatedNodeDependencies = array_map(function ($key, $dependency) {
         'abandoned' => $dependency['wanted'] === 'abandoned',
     ];
 }, array_keys($outdatedNodeDependencies), $outdatedNodeDependencies);
+$nodeAudit = shell_exec('npm audit --json');
+$nodeAudit = json_decode($nodeAudit, true);
+$nodeVulnerabilities = $nodeAudit['vulnerabilities'] ?? [];
 
 dbSetup($appName);
 
@@ -363,7 +403,7 @@ parseAndUpsertSBOM(
     devDependencyNames: $directNodeDevDependencies,
     outdatedDependencies: $outdatedNodeDependencies,
     abandonedPackages: [],
-    vulnerabilities: []
+    vulnerabilities: $nodeVulnerabilities,
 );
 
 checkForMissingRiskLevels();
