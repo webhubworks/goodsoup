@@ -1,8 +1,18 @@
 <?php
 
-function insertPackage($db, $package, $repositoryName, $ecosystem, $isDev, $latestVersion, $isAbandoned): void
+use Carbon\Carbon;
+use Composer\Semver\Semver;
+use Illuminate\Database\Capsule\Manager as Capsule;
+use Symfony\Component\VarDumper\VarDumper;
+use Webhubworks\Goodsoup\Models\Item;
+use Webhubworks\Goodsoup\Models\Vulnerability;
+
+// Autoload Composer dependencies
+require __DIR__ . '/../vendor/autoload.php';
+
+function upsertPackage($package, $repositoryName, $ecosystem, $isDev, $latestVersion, $toBeReplacedBy, $vulnerabilities): void
 {
-    $normalColumns = [
+    $columnsToCompareForChanges = [
         'repository',
         'ecosystem',
         'asset',
@@ -13,12 +23,12 @@ function insertPackage($db, $package, $repositoryName, $ecosystem, $isDev, $late
         'bom_ref',
         'is_dev',
         'is_abandoned',
+        'to_be_replaced_by',
         'description',
         'author',
         'license',
     ];
     $manualColumns = ['manual_end_of_support', 'manual_risk_level'];
-    $identifierColumns = ['ecosystem', 'bom_ref'];
 
     $itemData = [
         'repository' => $repositoryName,
@@ -27,10 +37,11 @@ function insertPackage($db, $package, $repositoryName, $ecosystem, $isDev, $late
         'name' => $package['name'] ?? '',
         'version' => $package['version'] ?? '',
         'latest_version' => $latestVersion ?? '',
-        'is_newer_version_available' => (int) version_compare($package['version'], $latestVersion, '<'),
+        'is_newer_version_available' => (bool) version_compare($package['version'], $latestVersion, '<'),
         'bom_ref' => $package['bom-ref'] ?? '',
-        'is_dev' => (int) $isDev ?? 0,
-        'is_abandoned' => (int) $isAbandoned ?? 0,
+        'is_dev' => (bool) $isDev ?? false,
+        'is_abandoned' => $toBeReplacedBy !== null,
+        'to_be_replaced_by' => $toBeReplacedBy,
         'description' => $package['description'] ?? '',
         'author' => $package['author'] ?? '',
         'license' => transformLicensesString($package),
@@ -41,115 +52,145 @@ function insertPackage($db, $package, $repositoryName, $ecosystem, $isDev, $late
     /**
      * Find an existing item based on non-manual columns
      */
-    $whereClause = implode(' AND ', array_map(fn($col) => "$col = :$col", $identifierColumns));
-    $query = "SELECT * FROM items WHERE $whereClause ORDER BY id DESC LIMIT 1";
-    $stmt = $db->prepare($query);
+    /** @var Item $item */
+    $item = Item::query()
+        ->where('ecosystem', $itemData['ecosystem'])
+        ->where('bom_ref', $itemData['bom_ref'])
+        ->orderBy('id', 'desc')
+        ->first();
 
-    foreach ($identifierColumns as $col) {
-        $stmt->bindValue(":$col", $itemData[$col]);
-    }
-
-    $stmt->execute();
-    $existingItem = $stmt->fetch(PDO::FETCH_ASSOC);
-
-    if ($existingItem) {
+    if ($item) {
         /**
          * Compare normal columns to see if there's a difference
          */
-        $hasChanges = false;
-        foreach ($normalColumns as $col) {
-            if ($existingItem[$col] !== $itemData[$col]) {
-                $hasChanges = true;
+        $changes = [];
+        foreach ($columnsToCompareForChanges as $col) {
+            if ($item[$col] !== $itemData[$col]) {
+                $changes[] = $col;
                 break;
             }
         }
 
-        if ($hasChanges) {
-            /**
-             * Prepare data for new row with copied manual values
-             */
+        if (count($changes) > 0) {
+            echo "Changes detected for column(s) ".implode(', ', $changes).".\n";
+
             foreach ($manualColumns as $manualCol) {
-                $itemData[$manualCol] = $existingItem[$manualCol];
+                $itemData[$manualCol] = $item[$manualCol];
             }
 
-            /**
-             * Insert the new item with updated data
-             */
-            $columns = implode(', ', array_keys($itemData));
-            $placeholders = implode(', ', array_map(fn($col) => ":$col", array_keys($itemData)));
-            $insertQuery = "INSERT INTO items ($columns) VALUES ($placeholders)";
-            $insertStmt = $db->prepare($insertQuery);
+            $item = Item::create($itemData);
+            upsertVulnerabilitiesPerItem($item, $vulnerabilities);
 
-            foreach ($itemData as $col => $value) {
-                $insertStmt->bindValue(":$col", $value);
-            }
-            $insertStmt->execute();
+            return;
         }
-    } else {
-        // No existing item found; insert the new item as is
-        $columns = implode(', ', array_keys($itemData));
-        $placeholders = implode(', ', array_map(fn($col) => ":$col", array_keys($itemData)));
-        $insertQuery = "INSERT INTO items ($columns) VALUES ($placeholders)";
-        $insertStmt = $db->prepare($insertQuery);
 
-        foreach ($itemData as $col => $value) {
-            $insertStmt->bindValue(":$col", $value);
-        }
-        $insertStmt->execute();
+        $item->touch();
+        upsertVulnerabilitiesPerItem($item, $vulnerabilities);
+
+        return;
     }
+
+    $item = Item::create($itemData);
+    upsertVulnerabilitiesPerItem($item, $vulnerabilities);
 }
 
-function parseAndUpsertSBOM($db, $jsonFile, $repositoryName, $ecosystem, $dependencyNames, $devDependencyNames, $outdatedDependencies): void
+function upsertVulnerabilitiesPerItem(Item $item, ?array $vulnerabilities = null): void
 {
-    // Read and decode the JSON file
+    $item->vulnerabilities()->delete();
+
+    if($vulnerabilities === null) {
+        return;
+    }
+
+    foreach($vulnerabilities as $vulnerability){
+        $item->vulnerabilities()->create([
+            'ecosystem' => $item->ecosystem,
+            'package_name' => $item->name,
+            'title' => $vulnerability['title'],
+            'url' => $vulnerability['link'],
+            'severity' => $vulnerability['severity'],
+            'affected_versions' => $vulnerability['affectedVersions'],
+            'cve' => $vulnerability['cve'] ?? null,
+            'cwe' => $vulnerability['cwe'] ?? null,
+            'advisory_id' => $vulnerability['id'] ?? null,
+            'reported_at' => $vulnerability['reportedAt'] ?? null,
+        ]);
+    }
+
+    $item->refresh();
+
+    $latestReportedVulnerability = $item->vulnerabilities->sortByDesc('reported_at')->first();
+    $affectedVersions = explode('|', $latestReportedVulnerability->affected_versions);
+
+    $isLatestVersionAffected = false;
+
+    foreach ($affectedVersions as $range) {
+        if (Semver::satisfies($item->latest_version, $range)) {
+            $isLatestVersionAffected = true;
+            break;
+        }
+    }
+
+    /**
+     * Actively maintained:
+     * - Latest version is not affected OR
+     * - Latest reported vulnerability is less than 30 days old
+     */
+    $item->update([
+        'is_actively_maintained' => !$isLatestVersionAffected || Carbon::parse($latestReportedVulnerability->reported_at)->diffInDays() < 30,
+    ]);
+}
+
+function parseAndUpsertSBOM($jsonFile, $repositoryName, $ecosystem, $dependencyNames, $devDependencyNames, $outdatedDependencies, $abandonedPackages, $vulnerabilities): void
+{
     $jsonContent = file_get_contents($jsonFile);
     $data = json_decode($jsonContent, true);
 
-    // Check if components exist in the data
-    if (isset($data['components']) && is_array($data['components'])) {
-        foreach ($data['components'] as $component) {
-            $combinedName = isset($component['group']) ? $component['group'].'/'.$component['name'] : $component['name'];
+    if (! isset($data['components']) || ! is_array($data['components'])) {
+        return;
+    }
 
-            if(in_array($combinedName, array_merge($dependencyNames, $devDependencyNames))) {
+    foreach ($data['components'] as $component) {
+        $combinedName = isset($component['group']) ? $component['group'].'/'.$component['name'] : $component['name'];
 
-                $isDev = in_array($combinedName, $devDependencyNames);
-                $outdatedDependency = array_filter($outdatedDependencies, function ($dependency) use ($combinedName) {
-                    return $dependency['name'] === $combinedName;
-                });
-                $outdatedDependency = reset($outdatedDependency);
-                if(isset($outdatedDependency) && is_array($outdatedDependency)) {
-                    $isAbandoned = (bool)$outdatedDependency['abandoned'] ?? false;
-                    $latestVersion = $outdatedDependency['latest'] ?? $component['version'];
-                } else {
-                    $isAbandoned = false;
-                    $latestVersion = $component['version'];
-                }
-
-                insertPackage($db, $component, $repositoryName, $ecosystem, $isDev, $latestVersion, $isAbandoned);
-            }
+        if(! in_array($combinedName, array_merge($dependencyNames, $devDependencyNames))) {
+            continue;
         }
+
+        $outdatedDependency = array_values(array_filter($outdatedDependencies, function ($dependency) use ($combinedName) {
+            return $dependency['name'] === $combinedName;
+        }));
+        if(isset($outdatedDependency[0])) {
+            $latestVersion = $outdatedDependency[0]['latest'] ?? $component['version'];
+        } else {
+            $latestVersion = $component['version'];
+        }
+
+        upsertPackage(
+            package: $component,
+            repositoryName: $repositoryName,
+            ecosystem: $ecosystem,
+            isDev: in_array($combinedName, $devDependencyNames),
+            latestVersion: $latestVersion,
+            toBeReplacedBy: $abandonedPackages[$combinedName] ?? null,
+            vulnerabilities: $vulnerabilities[$combinedName] ?? null,
+        );
     }
 }
 
-function checkForMissingRiskLevels($db): void
+function checkForMissingRiskLevels(): void
 {
-    $query = "
-        SELECT *
-        FROM items AS i1
-        WHERE i1.manual_risk_level IS NULL
-          AND i1.id = (
-              SELECT MAX(i2.id)
-              FROM items AS i2
-              WHERE i2.ecosystem = i1.ecosystem
-                AND i2.bom_ref = i1.bom_ref
-          )
-    ";
+    $itemsWithNullRiskLevel = Item::query()
+        ->whereNull('manual_risk_level')
+        ->whereIn('id', function ($query) {
+            $query->selectRaw('MAX(id)')
+                ->from('items as i2')
+                ->whereColumn('i2.ecosystem', 'items.ecosystem')
+                ->whereColumn('i2.bom_ref', 'items.bom_ref');
+        })
+        ->get()
+        ->toArray();
 
-    $stmt = $db->prepare($query);
-    $stmt->execute();
-    $itemsWithNullRiskLevel = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-// Step 3: Output a warning for each item
     foreach ($itemsWithNullRiskLevel as $item) {
         echo "- Warning: Item with ecosystem '{$item['ecosystem']}' and bom_ref '{$item['bom_ref']}' has no manual_risk_level.\n";
     }
@@ -178,36 +219,75 @@ function transformLicensesString($packageData): string
     return $licenseString;
 }
 
-function dbSetup(string $appName): PDO
+function dbSetup(string $appName): void
 {
     // Database file path (adjust the path as needed)
     $dbFile = './sboms/sbom-'.$appName.'.sqlite';
 
-    // Open or create the SQLite database
-    $db = new PDO('sqlite:' . $dbFile);
+    // Create the SQLite database file if it doesn't exist
+    if (!file_exists($dbFile)) {
+        touch($dbFile); // Create an empty file
+    }
 
-    $db->exec("
-        CREATE TABLE IF NOT EXISTS items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            repository TEXT NOT NULL,
-            ecosystem TEXT,
-            asset TEXT DEFAULT 'library',
-            name TEXT NOT NULL,
-            version TEXT NOT NULL,
-            latest_version TEXT NOT NULL,
-            is_newer_version_available BOOLEAN DEFAULT 0,
-            bom_ref TEXT,
-            is_dev BOOLEAN DEFAULT 0,
-            is_abandoned BOOLEAN DEFAULT 0,
-            description TEXT,
-            author TEXT,
-            license TEXT,
-            manual_end_of_support TEXT,
-            manual_risk_level TEXT
-        )
-    ");
+    // Initialize Eloquent
+    $capsule = new Capsule;
 
-    return $db;
+    $capsule->addConnection([
+        'driver'    => 'sqlite',
+        'database'  => $dbFile,
+        'prefix'    => '',
+    ]);
+
+    // Set the global Eloquent instance
+    $capsule->setAsGlobal();
+    $capsule->bootEloquent();
+
+    if (!Capsule::schema()->hasTable('items')) {
+        Capsule::schema()->create('items', function ($table) {
+            $table->increments('id');
+
+            $table->string('repository');
+            $table->string('ecosystem')->nullable();
+            $table->string('asset')->default('library');
+            $table->string('name');
+            $table->string('version');
+            $table->string('latest_version');
+            $table->boolean('is_newer_version_available')->default(0);
+            $table->string('bom_ref')->nullable();
+            $table->boolean('is_dev')->default(0);
+            $table->boolean('is_abandoned')->default(0);
+            $table->string('to_be_replaced_by')->nullable();
+            $table->boolean('is_actively_maintained')->default(1);
+            $table->text('description')->nullable();
+            $table->string('author')->nullable();
+            $table->string('license')->nullable();
+            $table->string('manual_end_of_support')->nullable();
+            $table->string('manual_risk_level')->nullable();
+
+            $table->timestamps();
+        });
+    }
+
+    if (!Capsule::schema()->hasTable('vulnerabilities')) {
+        Capsule::schema()->create('vulnerabilities', function ($table) {
+            $table->increments('id');
+
+            $table->foreignId('item_id')->constrained('items')->cascadeOnDelete();
+            $table->string('ecosystem');
+            $table->string('package_name');
+            $table->string('title');
+            $table->string('url');
+            $table->string('severity');
+            $table->string('affected_versions');
+
+            $table->string('cve')->nullable();
+            $table->string('cwe')->nullable();
+            $table->string('advisory_id')->nullable();
+
+            $table->timestamp('reported_at')->nullable();
+            $table->timestamps();
+        });
+    }
 }
 
 function getDependencies($filePath, $key) {
@@ -219,18 +299,41 @@ function getDependencies($filePath, $key) {
     return isset($data[$key]) ? array_keys($data[$key]) : [];
 }
 
+function dd(mixed ...$vars): never
+{
+    if (!\in_array(\PHP_SAPI, ['cli', 'phpdbg', 'embed'], true) && !headers_sent()) {
+        header('HTTP/1.1 500 Internal Server Error');
+    }
+
+    if (array_key_exists(0, $vars) && 1 === count($vars)) {
+        VarDumper::dump($vars[0]);
+    } else {
+        foreach ($vars as $k => $v) {
+            VarDumper::dump($v, is_int($k) ? 1 + $k : $k);
+        }
+    }
+
+    exit(1);
+}
+
 $repositoryName = trim(shell_exec('composer show -s --name-only'));
 $appName = explode('/', $repositoryName)[1];
 
+echo "Gathering composer data...\n";
 $directComposerDependencies = getDependencies('composer.json', 'require');
 $directComposerDevDependencies = getDependencies('composer.json', 'require-dev');
-$outdatedComposerDependencies = shell_exec('composer outdated --format=json');
+$outdatedComposerDependencies = shell_exec('composer outdated --ignore-platform-reqs --format=json');
 $outdatedComposerDependencies = json_decode($outdatedComposerDependencies, true);
+$composerAudit = shell_exec('composer audit --format=json');
+$composerAudit = json_decode($composerAudit, true);
+$composerVulnerabilities = $composerAudit['advisories'] ?? [];
+$composerAbandonedPackages = $composerAudit['abandoned'] ?? [];
+
+echo "Gathering node data...\n";
 $directNodeDependencies = getDependencies('package.json', 'dependencies');
 $directNodeDevDependencies = getDependencies('package.json', 'devDependencies');
 $outdatedNodeDependencies = shell_exec('npm outdated --json');
 $outdatedNodeDependencies = json_decode($outdatedNodeDependencies, true);
-// Map associative array to simple array with 'name', 'version', 'latest', 'abandoned' keys
 $outdatedNodeDependencies = array_map(function ($key, $dependency) {
     return [
         'name' => $key,
@@ -240,27 +343,29 @@ $outdatedNodeDependencies = array_map(function ($key, $dependency) {
     ];
 }, array_keys($outdatedNodeDependencies), $outdatedNodeDependencies);
 
-$db = dbSetup($appName);
+dbSetup($appName);
 
 parseAndUpsertSBOM(
-    db: $db,
     jsonFile: './sboms/sbom-composer.json',
     repositoryName: $repositoryName,
     ecosystem: 'composer',
     dependencyNames: $directComposerDependencies,
     devDependencyNames: $directComposerDevDependencies,
     outdatedDependencies: $outdatedComposerDependencies['installed'] ?? [],
+    abandonedPackages: $composerAbandonedPackages,
+    vulnerabilities: $composerVulnerabilities,
 );
 parseAndUpsertSBOM(
-    db: $db,
     jsonFile: './sboms/sbom-node.json',
     repositoryName: $repositoryName,
     ecosystem: 'node',
     dependencyNames: $directNodeDependencies,
     devDependencyNames: $directNodeDevDependencies,
     outdatedDependencies: $outdatedNodeDependencies,
+    abandonedPackages: [],
+    vulnerabilities: []
 );
 
-checkForMissingRiskLevels($db);
+checkForMissingRiskLevels();
 
 echo "Data upserted into the database successfully.\n";

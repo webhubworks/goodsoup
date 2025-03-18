@@ -15,7 +15,10 @@
     ],
     "require": {
         "php": "^8.1",
-        "cyclonedx/cyclonedx-php-composer": "^5.2"
+        "cyclonedx/cyclonedx-php-composer": "^5.2",
+        "illuminate/database": "^10.0",
+        "symfony/var-dumper": "^6",
+        "composer/semver": "^3.4"
     },
     "config": {
         "allow-plugins": {

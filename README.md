@@ -5,6 +5,9 @@
 - `ddev ssh`
 - `vendor/bin/goodsoup.sh`
 
+### Errors
+If you see `npm ERR! code ELSPROBLEMS` errors, try run `npm dedupe`
+
 ## How to create the cyclonedx-npm standalone executable
 1. `nvm use`
 2. `git clone https://github.com/CycloneDX/cyclonedx-node-npm.git vendor-tools/cyclonedx-npm`
