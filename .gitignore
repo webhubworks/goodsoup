@@ -4,4 +4,4 @@
 .phpunit.result.cache
 /.phpunit.cache/
 build/report.junit.xml
-.DS_Store
+.DS_Store/composer.lock
